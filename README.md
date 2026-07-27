@@ -4,9 +4,21 @@ A feature-rich, high-performance Python application for real-time visualization,
 
 Features an interactive **ROS-compliant TF (Transform) Coordinate Frame (`laser_frame`)**, real-time polar radar grid, distance/intensity heatmap rendering, hover inspection, pan/zoom camera controls, and automatic hardware diagnostics.
 
+<p align="center">
+  <img src="example.png" alt="MB_1R2T 2D LIDAR Visualizer Demo" width="850"/>
+</p>
+
+## ✨ Key Features
+
+- **Real-Time Multithreaded Processing**: Runs the LiDAR parser in a dedicated background thread for 0% packet loss and exact tracking of the physical rotation rate (e.g., 6.0 Hz).
+- **Buttery-Smooth UI (60 FPS)**: Hardware-accelerated Pygame-CE engine for seamless zooming, panning, and hover interactions, decoupled from the sensor's data rate.
+- **ROS-Compliant Coordinate Frame**: Standard `+X Forward` and `+Y Left` TF axis representation (`laser_frame`).
+- **Interactive Telemetry HUD**: Live metrics including hardware scan rate, UI framerate, data density, distance limits, and packet IDs.
+- **Dynamic Heatmaps**: Beautiful glowing point clouds with customizable color palettes (Distance Heatmap, Intensity, Neon Cyan).
+
 ---
 
-## Hardware Specifications & Connector Pinout
+## 🔌 Hardware Specifications & Connector Pinout
 
 ### 1. PCB Connector Layout & Pinout
 
@@ -53,7 +65,7 @@ The rotation speed and sampling resolution can be adjusted by changing the volta
 
 ---
 
-## Data Packet Protocol Specification
+## 📡 Data Packet Protocol Specification
 
 The MB_1R2T LIDAR transmits continuous binary packets. Each data packet is structured as follows:
 
@@ -88,20 +100,20 @@ world_y = math.sin(angle_radians) * distance_meters  # +Y Left
 
 ---
 
-## Deployment Guide from Scratch (Any OS)
+## 🚀 Deployment Guide from Scratch (Any OS)
 
-###  macOS Deployment
+### 🍏 macOS Deployment
 ```bash
 # Clone repository
-git clone https://github.com/Vidicon/mb_1r2t_ros.git MB_1R2T_LIDAR_Demo
-cd MB_1R2T_LIDAR_Demo
+git clone https://github.com/impet14/MB_1R2T_DEMO.git
+cd MB_1R2T_DEMO
 
 # Setup Virtual Environment
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pyserial pygame-ce
+pip install -r requirements.txt
 
-# Find connected serial port
+# Find connected serial port (Update PORT_NAME in mb_1r2t.py if needed)
 ls /dev/cu.usbserial*
 
 # Run visualizer
@@ -115,13 +127,13 @@ sudo apt update && sudo apt install -y python3 python3-venv git
 sudo usermod -aG dialout $USER
 
 # Setup project
-git clone https://github.com/Vidicon/mb_1r2t_ros.git MB_1R2T_LIDAR_Demo
-cd MB_1R2T_LIDAR_Demo
+git clone https://github.com/impet14/MB_1R2T_DEMO.git
+cd MB_1R2T_DEMO
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pyserial pygame-ce
+pip install -r requirements.txt
 
-# Identify USB port and run
+# Identify USB port and run (Update PORT_NAME in mb_1r2t.py if needed)
 ls /dev/ttyUSB*
 python mb_1r2t.py
 ```
@@ -129,16 +141,22 @@ python mb_1r2t.py
 ### 🪟 Windows 10 / 11 Deployment
 Open PowerShell:
 ```powershell
-cd C:\path\to\MB_1R2T_LIDAR_Demo
+# Clone repository
+git clone https://github.com/impet14/MB_1R2T_DEMO.git
+cd MB_1R2T_DEMO
+
+# Setup Virtual Environment
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install pyserial pygame-ce
+pip install -r requirements.txt
+
+# Identify COM port in Device Manager, update PORT_NAME in mb_1r2t.py (e.g., 'COM3')
 python mb_1r2t.py
 ```
 
 ---
 
-## Interactive Controls Reference
+## 🎮 Interactive Controls Reference
 
 | Input / Shortcut | Action | Description |
 | :---: | :--- | :--- |
@@ -155,8 +173,13 @@ python mb_1r2t.py
 
 ---
 
-## Acknowledggements & Technical References
+## 📜 Acknowledgements & Technical References
 
 - **STM32 Protocol Research**: Special thanks to [pav2000/LidarStm32f103](https://github.com/pav2000/LidarStm32f103) for STM32 microcontroller driver analysis and MB_1R2T packet protocol reverse-engineering.
 - **Base ROS Package**: Inspired by [Vidicon/mb_1r2t_ros](https://github.com/Vidicon/mb_1r2t_ros).
 - **Visualization Engine**: Pygame-CE (Community Edition).
+- **Architecture**: Designed with ROS-compliant frames and decoupled multithreading for maximum throughput.
+
+## 🤝 Contributing
+Contributions, issues, and feature requests are welcome! 
+Feel free to check [issues page](https://github.com/impet14/MB_1R2T_DEMO/issues). If you create any cool robots or mapping solutions using this code, share it!
