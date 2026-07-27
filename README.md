@@ -5,7 +5,7 @@ A feature-rich, high-performance Python application for real-time visualization,
 Features an interactive **ROS-compliant TF (Transform) Coordinate Frame (`laser_frame`)**, real-time polar radar grid, distance/intensity heatmap rendering, hover inspection, pan/zoom camera controls, and automatic hardware diagnostics.
 
 <p align="center">
-  <img src="example.png" alt="MB_1R2T 2D LIDAR Visualizer Demo" width="850"/>
+  <img src="demo.png" alt="MB_1R2T 2D LIDAR Visualizer Demo" width="850"/>
 </p>
 
 ## ✨ Key Features
