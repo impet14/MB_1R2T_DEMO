@@ -2,6 +2,7 @@ import serial
 import pygame
 import math
 import time
+import threading
 from enum import Enum
 
 class State(Enum):
@@ -58,9 +59,13 @@ pan_start_pos = (0, 0)
 show_grid = True
 show_tf_axis = True
 show_hud = True
-show_sweep = True
+show_sweep = False
 color_mode = ColorMode.DISTANCE
 is_paused = False
+
+# Persistent surface for glowing points (Performance Optimization)
+point_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+
 
 # Telemetry tracking
 current_frame_points = []
@@ -144,6 +149,7 @@ def get_point_color(dist_m, intensity, mode):
         g = int(10 + norm * 245)
         b = int(80 + norm * 175)
         return (r, g, b)
+        return (r, g, b)
     else:  # Neon Cyan
         return (0, 229, 255)
 
@@ -161,15 +167,119 @@ def draw_arrow(surface, color, start_pos, end_pos, width=3, arrow_size=10):
     pygame.draw.polygon(surface, color, [end_pos, p1, p2])
 
 # --- Main Application Loop ---
-state = State.SYNC0
-package_type = 0
-package_size = 0
-package_start = 0
-package_stop = 0
-last_angle = 0
-
 running = True
 show_disconnected_warning = False
+package_type = 0
+scan_rate_hz = 0.0
+
+# --- Serial Reader Thread ---
+def serial_reader_thread():
+    global com, render_points, current_frame_points
+    global point_count_last_frame, min_dist_m, max_dist_m
+    global last_packet_time, sweep_angle_rad, show_disconnected_warning, package_type
+    global scan_rate_hz
+
+    state = State.SYNC0
+    package_type = 0
+    package_size = 0
+    package_start = 0
+    package_stop = 0
+    last_angle = 0
+    
+    last_frame_time = time.time()
+
+    while running:
+        if com is not None and com.is_open and not is_paused:
+            try:
+                # Read all available packets without blocking Pygame
+                while com.in_waiting > 0:
+                    if state == State.SYNC0:
+                        sync = com.read(1)
+                        if len(sync) > 0 and sync[0] == 0xAA:
+                            state = State.SYNC1
+                    
+                    elif state == State.SYNC1:
+                        sync = com.read(1)
+                        if len(sync) > 0 and sync[0] == 0x55:
+                            state = State.HEADER
+                        else:
+                            state = State.SYNC0
+                    
+                    elif state == State.HEADER:
+                        header = com.read(8)
+                        if len(header) == 8:
+                            package_type = header[0]
+                            package_size = header[1]
+                            package_start = (header[3] << 8) | header[2]
+                            package_stop = (header[5] << 8) | header[4]
+                            state = State.DATA
+                        else:
+                            state = State.SYNC0
+
+                    elif state == State.DATA:
+                        if package_size > 0:
+                            data = com.read(package_size * 3)
+                            if len(data) == package_size * 3 and not (package_type & 0x01):
+                                diff = package_stop - package_start
+                                if package_stop < package_start:
+                                    diff = 0xB400 - package_start + package_stop
+
+                                step = diff / (package_size - 1) if diff > 1 else 0
+
+                                for i in range(package_size):
+                                    intensity = data[i * 3 + 0]
+                                    distance = (data[i * 3 + 2] << 8) | data[i * 3 + 1]
+                                    distance_m = distance / 4000.0  # 0.25mm units to meters
+
+                                    angle = (package_start + step * i) % 0xB400
+                                    angle_rad = (angle / 0xB400) * (math.pi * 2)
+                                    sweep_angle_rad = angle_rad
+
+                                    if 0.05 < distance_m < 15.0:  # Valid range filter
+                                        world_x = math.cos(angle_rad) * distance_m
+                                        world_y = math.sin(angle_rad) * distance_m
+                                        current_frame_points.append((world_x, world_y, distance_m, intensity, angle_rad))
+
+                                    # Frame Complete Check
+                                    if angle_rad < last_angle:
+                                        render_points = list(current_frame_points)
+                                        point_count_last_frame = len(render_points)
+                                        if render_points:
+                                            dists = [p[2] for p in render_points]
+                                            min_dist_m = min(dists)
+                                            max_dist_m = max(dists)
+                                        current_frame_points = []
+                                        
+                                        current_time = time.time()
+                                        dt = current_time - last_frame_time
+                                        if dt > 0:
+                                            # Simple low-pass filter for stable reading
+                                            new_hz = 1.0 / dt
+                                            scan_rate_hz = (scan_rate_hz * 0.8) + (new_hz * 0.2)
+                                        last_frame_time = current_time
+                                        last_packet_time = current_time
+                                    
+                                    last_angle = angle_rad
+
+                        state = State.SYNC0
+                        show_disconnected_warning = False
+            
+            except (serial.SerialException, OSError) as e:
+                com = None
+                global serial_status_msg
+                serial_status_msg = f"Connection Lost: {e}"
+                show_disconnected_warning = True
+        else:
+            if com is None and not is_paused:
+                # Auto-reconnect attempt every 2 seconds
+                if time.time() - last_packet_time > 2.0:
+                    com = open_serial()
+                    last_packet_time = time.time()
+            show_disconnected_warning = (time.time() - last_packet_time > 2.0)
+            time.sleep(0.01)
+
+# Start the background thread
+threading.Thread(target=serial_reader_thread, daemon=True).start()
 
 while running:
     # --- Event Handling ---
@@ -179,16 +289,26 @@ while running:
         elif event.type == pygame.VIDEORESIZE:
             WIDTH, HEIGHT = event.w, event.h
             screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.DOUBLEBUF | pygame.RESIZABLE)
+            point_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             center_x = WIDTH // 2
             center_y = HEIGHT // 2
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1 or event.button == 2:  # Left or Middle click
                 is_panning = True
                 pan_start_pos = event.pos
-            elif event.button == 4:  # Zoom in
-                scale = min(scale * 1.15, 2000.0)
-            elif event.button == 5:  # Zoom out
-                scale = max(scale / 1.15, 5.0)
+            elif event.button == 4 or event.button == 5:  # Zoom
+                mx, my = event.pos
+                # Calculate world coordinate under mouse before zoom
+                wx, wy = screen_to_world(mx, my)
+                
+                if event.button == 4:
+                    scale = min(scale * 1.15, 2000.0)
+                else:
+                    scale = max(scale / 1.15, 5.0)
+                    
+                # Re-adjust pan to keep the same world coordinate under the mouse
+                pan_x = mx - center_x + wy * scale
+                pan_y = my - center_y + wx * scale
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == 1 or event.button == 2:
                 is_panning = False
@@ -216,83 +336,7 @@ while running:
             elif event.key == pygame.K_SPACE or event.key == pygame.K_p:  # Pause
                 is_paused = not is_paused
 
-    # --- Serial Communication & Protocol Decoding ---
-    if com is not None and com.is_open and not is_paused:
-        try:
-            if state == State.SYNC0:
-                sync = com.read(1)
-                if len(sync) > 0 and sync[0] == 0xAA:
-                    state = State.SYNC1
-            
-            elif state == State.SYNC1:
-                sync = com.read(1)
-                if len(sync) > 0 and sync[0] == 0x55:
-                    state = State.HEADER
-                else:
-                    state = State.SYNC0
-            
-            elif state == State.HEADER:
-                header = com.read(8)
-                if len(header) == 8:
-                    package_type = header[0]
-                    package_size = header[1]
-                    package_start = (header[3] << 8) | header[2]
-                    package_stop = (header[5] << 8) | header[4]
-                    state = State.DATA
-                else:
-                    state = State.SYNC0
-
-            elif state == State.DATA:
-                if package_size > 0:
-                    data = com.read(package_size * 3)
-                    if len(data) == package_size * 3 and not (package_type & 0x01):
-                        diff = package_stop - package_start
-                        if package_stop < package_start:
-                            diff = 0xB400 - package_start + package_stop
-
-                        step = diff / (package_size - 1) if diff > 1 else 0
-
-                        for i in range(package_size):
-                            intensity = data[i * 3 + 0]
-                            distance = (data[i * 3 + 2] << 8) | data[i * 3 + 1]
-                            distance_m = distance / 4000.0  # 0.25mm units to meters
-
-                            angle = (package_start + step * i) % 0xB400
-                            angle_rad = (angle / 0xB400) * (math.pi * 2)
-                            sweep_angle_rad = angle_rad
-
-                            if 0.05 < distance_m < 15.0:  # Valid range filter
-                                world_x = math.cos(angle_rad) * distance_m
-                                world_y = math.sin(angle_rad) * distance_m
-                                current_frame_points.append((world_x, world_y, distance_m, intensity, angle_rad))
-
-                            # Frame Complete Check
-                            if angle_rad < last_angle:
-                                render_points = list(current_frame_points)
-                                point_count_last_frame = len(render_points)
-                                if render_points:
-                                    dists = [p[2] for p in render_points]
-                                    min_dist_m = min(dists)
-                                    max_dist_m = max(dists)
-                                current_frame_points = []
-                                last_packet_time = time.time()
-                            
-                            last_angle = angle_rad
-
-                state = State.SYNC0
-                show_disconnected_warning = False
-
-        except (serial.SerialException, OSError) as e:
-            com = None
-            serial_status_msg = f"Connection Lost: {e}"
-            show_disconnected_warning = True
-    else:
-        if com is None and not is_paused:
-            # Auto-reconnect attempt every 2 seconds
-            if time.time() - last_packet_time > 2.0:
-                com = open_serial()
-                last_packet_time = time.time()
-        show_disconnected_warning = (time.time() - last_packet_time > 2.0)
+    # --- Event Handling (Pygame only handles UI and Rendering here) ---
 
     # --- Render Canvas ---
     screen.fill(COLOR_BG)
@@ -300,7 +344,10 @@ while running:
 
     # --- 1. Draw Polar Grid & Range Rings ---
     if show_grid:
-        grid_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        # Use solid colors that simulate alpha blending against the background for performance
+        COLOR_RAY = (20, 30, 45)
+        COLOR_RING = (15, 45, 65)
+
         # Polar Rays (every 30 degrees)
         for deg in range(0, 360, 30):
             rad = math.radians(deg)
@@ -308,7 +355,7 @@ while running:
             ray_x = math.cos(rad) * 15.0
             ray_y = math.sin(rad) * 15.0
             end_sx, end_sy = world_to_screen(ray_x, ray_y)
-            pygame.draw.line(grid_surface, (25, 38, 58, 120), (origin_sx, origin_sy), (end_sx, end_sy), 1)
+            pygame.draw.line(screen, COLOR_RAY, (origin_sx, origin_sy), (end_sx, end_sy), 1)
 
             # Degree labels on outer ring
             label_x = math.cos(rad) * (350 / scale)
@@ -317,20 +364,18 @@ while running:
             if 0 <= lsx <= WIDTH and 0 <= lsy <= HEIGHT:
                 deg_str = f"{deg}°"
                 txt = font_small.render(deg_str, True, COLOR_GRID_TEXT)
-                grid_surface.blit(txt, (lsx - txt.get_width() // 2, lsy - txt.get_height() // 2))
+                screen.blit(txt, (lsx - txt.get_width() // 2, lsy - txt.get_height() // 2))
 
         # Concentric Distance Rings (0.5m, 1m, 2m, 3m, 4m, 5m, 6m, 8m, 10m)
         rings_m = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
         for r_m in rings_m:
             r_px = int(r_m * scale)
             if r_px > 5:
-                pygame.draw.circle(grid_surface, (0, 180, 255, 35), (origin_sx, origin_sy), r_px, 1)
+                pygame.draw.circle(screen, COLOR_RING, (origin_sx, origin_sy), r_px, 1)
                 # Distance label
                 lbl_text = f"{r_m:.1f}m ({r_m * 3.28084:.1f}ft)"
                 lbl_surf = font_small.render(lbl_text, True, COLOR_GRID_TEXT)
-                grid_surface.blit(lbl_surf, (origin_sx + 8, origin_sy - r_px - 10))
-
-        screen.blit(grid_surface, (0, 0))
+                screen.blit(lbl_surf, (origin_sx + 8, origin_sy - r_px - 10))
 
     # --- 2. Draw Radar Laser Sweep Line ---
     if show_sweep:
@@ -338,23 +383,21 @@ while running:
         sw_x = math.cos(sweep_angle_rad) * sweep_len
         sw_y = math.sin(sweep_angle_rad) * sweep_len
         sw_sx, sw_sy = world_to_screen(sw_x, sw_y)
-        sweep_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        pygame.draw.line(sweep_surf, (0, 229, 255, 180), (origin_sx, origin_sy), (sw_sx, sw_sy), 2)
-        screen.blit(sweep_surf, (0, 0))
+        pygame.draw.line(screen, (0, 150, 170), (origin_sx, origin_sy), (sw_sx, sw_sy), 2)
 
     # --- 3. Draw LIDAR Point Cloud ---
     mouse_pos = pygame.mouse.get_pos()
     hovered_point = None
     min_hover_dist_px = 12.0
 
-    point_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    point_surface.fill((0, 0, 0, 0))  # Clear the transparent layer
 
     for wx, wy, dist_m, intensity, ang_rad in render_points:
         psx, psy = world_to_screen(wx, wy)
         if 0 <= psx <= WIDTH and 0 <= psy <= HEIGHT:
             color = get_point_color(dist_m, intensity, color_mode)
             
-            # Point Glow effect
+            # Beautiful glowing point effect
             pygame.draw.circle(point_surface, (*color, 60), (psx, psy), 4)
             pygame.draw.circle(point_surface, (*color, 240), (psx, psy), 2)
 
@@ -368,7 +411,6 @@ while running:
 
     # --- 4. Draw TF (Transform) Coordinate Frame ---
     if show_tf_axis:
-        tf_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         axis_len_px = 70
         
         # ROS Coordinate Standard:
@@ -381,25 +423,23 @@ while running:
         y_end_sy = origin_sy
 
         # Draw +X Axis (Red Arrow)
-        draw_arrow(tf_surface, COLOR_TF_X, (origin_sx, origin_sy), (x_end_sx, x_end_sy), width=3, arrow_size=8)
+        draw_arrow(screen, COLOR_TF_X, (origin_sx, origin_sy), (x_end_sx, x_end_sy), width=3, arrow_size=8)
         lbl_x = font_hud.render("+X (Forward)", True, COLOR_TF_X)
-        tf_surface.blit(lbl_x, (x_end_sx + 8, x_end_sy - 5))
+        screen.blit(lbl_x, (x_end_sx + 8, x_end_sy - 5))
 
         # Draw +Y Axis (Green Arrow)
-        draw_arrow(tf_surface, COLOR_TF_Y, (origin_sx, origin_sy), (y_end_sx, y_end_sy), width=3, arrow_size=8)
+        draw_arrow(screen, COLOR_TF_Y, (origin_sx, origin_sy), (y_end_sx, y_end_sy), width=3, arrow_size=8)
         lbl_y = font_hud.render("+Y (Left)", True, COLOR_TF_Y)
-        tf_surface.blit(lbl_y, (y_end_sx - lbl_y.get_width() - 8, y_end_sy - 15))
+        screen.blit(lbl_y, (y_end_sx - lbl_y.get_width() - 8, y_end_sy - 15))
 
         # Draw TF Sensor Origin Marker (Robot / Laser Center)
-        pygame.draw.circle(tf_surface, (0, 229, 255, 40), (origin_sx, origin_sy), 14)
-        pygame.draw.circle(tf_surface, COLOR_ORIGIN, (origin_sx, origin_sy), 5)
-        pygame.draw.circle(tf_surface, (10, 14, 23), (origin_sx, origin_sy), 2)
+        pygame.draw.circle(screen, (0, 70, 80), (origin_sx, origin_sy), 14)
+        pygame.draw.circle(screen, COLOR_ORIGIN, (origin_sx, origin_sy), 5)
+        pygame.draw.circle(screen, (10, 14, 23), (origin_sx, origin_sy), 2)
 
         # TF Frame Name Label
         lbl_frame = font_small.render("frame_id: laser_frame", True, (0, 229, 255))
-        tf_surface.blit(lbl_frame, (origin_sx + 10, origin_sy + 10))
-
-        screen.blit(tf_surface, (0, 0))
+        screen.blit(lbl_frame, (origin_sx + 10, origin_sy + 10))
 
     # --- 5. Draw Mouse Hover Measurement HUD ---
     if hovered_point:
@@ -432,18 +472,16 @@ while running:
 
     # --- 6. Draw Main HUD Telemetry Overlays ---
     if show_hud:
-        hud_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        
         # --- Top Left: Telemetry Panel ---
-        panel_w, panel_h = 320, 215
+        panel_w, panel_h = 400, 245
         p_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         p_surf.fill(COLOR_PANEL_BG)
         pygame.draw.rect(p_surf, COLOR_PANEL_BORDER, (0, 0, panel_w, panel_h), 1, border_radius=8)
 
         # Title
         t_title = font_title.render("MB_1R2T TELEMETRY HUD", True, (0, 229, 255))
-        p_surf.blit(t_title, (14, 12))
-        pygame.draw.line(p_surf, (0, 180, 255, 60), (14, 36), (panel_w - 14, 36), 1)
+        p_surf.blit(t_title, (14, 14))
+        pygame.draw.line(p_surf, (0, 180, 255, 60), (14, 40), (panel_w - 14, 40), 1)
 
         # Metrics
         fps = clock.get_fps()
@@ -457,32 +495,33 @@ while running:
             ("Status:", st_text, st_color),
             ("Port:", f"{PORT_NAME} @ {BAUD_RATE} bps", COLOR_TEXT_MAIN),
             ("Firmware Type:", f"0x{package_type:02X} (Header ID)", (255, 200, 0)),
-            ("FPS / Rate:", f"{fps:.1f} FPS | Scan Rate: {fps/5.0:.1f} Hz", COLOR_TEXT_MAIN),
+            ("LiDAR Scan Rate:", f"{scan_rate_hz:.1f} Hz (Rotations/sec)", COLOR_TEXT_MAIN),
+            ("UI Framerate:", f"{fps:.1f} FPS", COLOR_TEXT_MUTED),
             ("Points / Frame:", f"{point_count_last_frame} pts", (0, 229, 255)),
             ("Distance Range:", f"{min_dist_m:.2f} m  ->  {max_dist_m:.2f} m", (255, 200, 0)),
             ("Zoom Level:", f"{scale:.1f} px/m (Scale 1:{100.0/scale:.2f})", COLOR_TEXT_MUTED),
             ("Color Mode:", color_mode.name, (0, 230, 135)),
         ]
 
-        y_off = 44
+        y_off = 48
         for label, val, color in lines:
             txt_lbl = font_hud.render(label, True, COLOR_TEXT_MUTED)
             txt_val = font_hud.render(val, True, color)
             p_surf.blit(txt_lbl, (14, y_off))
-            p_surf.blit(txt_val, (130, y_off))
-            y_off += 20
+            p_surf.blit(txt_val, (155, y_off))  # Increased X offset from 130 to 155 to prevent overlap
+            y_off += 21  # Increased line spacing
 
-        hud_surf.blit(p_surf, (15, 15))
+        screen.blit(p_surf, (15, 15))
 
         # --- Top Right: Controls Guide Panel ---
-        ctrl_w, ctrl_h = 240, 160
+        ctrl_w, ctrl_h = 290, 180
         c_surf = pygame.Surface((ctrl_w, ctrl_h), pygame.SRCALPHA)
         c_surf.fill(COLOR_PANEL_BG)
         pygame.draw.rect(c_surf, COLOR_PANEL_BORDER, (0, 0, ctrl_w, ctrl_h), 1, border_radius=8)
 
         ct_title = font_title.render("CONTROLS & SHORTCUTS", True, (255, 200, 0))
-        c_surf.blit(ct_title, (14, 12))
-        pygame.draw.line(c_surf, (255, 200, 0, 60), (14, 36), (ctrl_w - 14, 36), 1)
+        c_surf.blit(ct_title, (14, 14))
+        pygame.draw.line(c_surf, (255, 200, 0, 60), (14, 40), (ctrl_w - 14, 40), 1)
 
         controls = [
             ("[Scroll]", "Zoom In / Out"),
@@ -494,16 +533,15 @@ while running:
             ("[H]", "Toggle HUD Display"),
         ]
 
-        cy_off = 42
+        cy_off = 48
         for k_text, d_text in controls:
             k_surf = font_small.render(k_text, True, (0, 229, 255))
             d_surf = font_small.render(d_text, True, COLOR_TEXT_MAIN)
             c_surf.blit(k_surf, (14, cy_off))
-            c_surf.blit(d_surf, (105, cy_off))
-            cy_off += 16
+            c_surf.blit(d_surf, (120, cy_off))  # Increased X offset from 105 to 120
+            cy_off += 18  # Increased line spacing
 
-        hud_surf.blit(c_surf, (WIDTH - ctrl_w - 15, 15))
-        screen.blit(hud_surf, (0, 0))
+        screen.blit(c_surf, (WIDTH - ctrl_w - 15, 15))
 
     # --- 7. Draw Hardware Diagnostic Warning (If No Serial Data) ---
     if show_disconnected_warning and not is_paused:
