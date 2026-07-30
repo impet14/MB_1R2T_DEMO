@@ -182,4 +182,8 @@ python mb_1r2t.py
 
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! 
-Feel free to check [issues page](https://github.com/impet14/MB_1R2T_DEMO/issues). If you create any cool robots or mapping solutions using this code, share it!
+Feel free to check the [issues page](https://github.com/impet14/MB_1R2T_DEMO/issues). If you create any cool robots or mapping solutions using this code, share it!
+
+⭐️ **Show your support**  
+If you find this project useful or inspiring, please give it a **star** on GitHub — it helps support the project and makes it more visible to others!
+
